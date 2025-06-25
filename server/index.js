@@ -7,12 +7,20 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 const clients = new Map();
+const pendingRequests = new Map();
 
 wss.on("connection", (ws) => {
   let clientId = null;
 
   ws.on("message", (msg) => {
     const data = JSON.parse(msg);
+
+    if (data.type === "register") {
+      clientId = data.clientId;
+      clients.set(clientId, ws);
+      console.log(`[Relay] Client registered: ${clientId}`);
+      return;
+    }
 
     if (data.type === "response") {
       const { requestId, body, status, headers, encoding } = data;
@@ -38,13 +46,15 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
-    if (clientId) clients.delete(clientId);
+    if (clientId) {
+      clients.delete(clientId);
+      console.log(`[Relay] Client disconnected: ${clientId}`);
+    }
   });
 });
 
-const pendingRequests = new Map();
-
 app.use(express.json());
+
 app.all("/tunnel/:clientId/*", async (req, res) => {
   const clientId = req.params.clientId;
   const clientWs = clients.get(clientId);
@@ -54,7 +64,6 @@ app.all("/tunnel/:clientId/*", async (req, res) => {
   }
 
   const requestId = Math.random().toString(36).slice(2);
-
   pendingRequests.set(requestId, res);
 
   clientWs.send(
