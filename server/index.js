@@ -11,23 +11,29 @@ const clients = new Map();
 wss.on("connection", (ws) => {
   let clientId = null;
 
-  ws.on("message", async (msg) => {
+  ws.on("message", (msg) => {
     const data = JSON.parse(msg);
 
-    if (data.type === "register") {
-      clientId = data.clientId;
-      clients.set(clientId, ws);
-      console.log(`[Relay] Client registered: ${clientId}`);
-      return;
-    }
-
     if (data.type === "response") {
-      const { requestId, body, status } = data;
+      const { requestId, body, status, headers, encoding } = data;
+
       const res = pendingRequests.get(requestId);
-      if (res) {
-        res.status(status || 200).send(body);
-        pendingRequests.delete(requestId);
+      if (!res) return;
+
+      if (headers) {
+        Object.entries(headers).forEach(([key, value]) => {
+          if (key.toLowerCase() === "content-encoding") return;
+          res.setHeader(key, value);
+        });
       }
+
+      if (encoding === "base64") {
+        res.status(status || 200).send(Buffer.from(body, "base64"));
+      } else {
+        res.status(status || 200).send(body);
+      }
+
+      pendingRequests.delete(requestId);
     }
   });
 
@@ -58,7 +64,7 @@ app.all("/tunnel/:clientId/*", async (req, res) => {
       method: req.method,
       path: req.params[0],
       headers: req.headers,
-      body: req.body,
+      body: req.body
     })
   );
 
@@ -70,6 +76,4 @@ app.all("/tunnel/:clientId/*", async (req, res) => {
   }, 10000);
 });
 
-server.listen(3005, () =>
-  console.log(`Relay server running at http://localhost:3005`)
-);
+server.listen(3005, () => console.log(`Relay server running at http://localhost:3005`));
