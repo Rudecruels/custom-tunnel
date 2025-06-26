@@ -13,7 +13,14 @@ ws.on("open", () => {
 });
 
 ws.on("message", async (msg) => {
-  const data = JSON.parse(msg);
+  let data;
+  try {
+    data = JSON.parse(msg);
+    console.log(`[Client] Received message:`, data);
+  } catch (err) {
+    console.error(`[Client] Failed to parse message:`, msg.toString(), err);
+    return;
+  }
 
   if (data.type === "request") {
     const { requestId, method, path, headers, body } = data;
@@ -23,6 +30,7 @@ ws.on("message", async (msg) => {
       headers
     };
     const url = new URL(`${localTarget}/${path}`);
+    console.log(`[Client] Requesting: ${url}`);
 
     const req = http.request(
       {
@@ -33,7 +41,7 @@ ws.on("message", async (msg) => {
         headers
       },
       (resp) => {
-        // Send response metadata first
+        // Send response metadata
         ws.send(
           JSON.stringify({
             type: "response",
@@ -41,19 +49,25 @@ ws.on("message", async (msg) => {
             status: resp.statusCode,
             headers: resp.headers,
             encoding: "base64",
-            isStream: true // Indicate streaming response
+            isStream: true
           })
         );
 
         // Stream response body
         resp.on("data", (chunk) => {
-          ws.send(
-            JSON.stringify({
-              type: "response-chunk",
-              requestId,
-              chunk: chunk.toString("base64")
-            })
-          );
+          try {
+            const base64Chunk = chunk.toString("base64");
+            ws.send(
+              JSON.stringify({
+                type: "response-chunk",
+                requestId,
+                chunk: base64Chunk
+              })
+            );
+            console.log(`[Client] Sent chunk for request ${requestId}, size: ${chunk.length}`);
+          } catch (err) {
+            console.error(`[Client] Error encoding chunk:`, err);
+          }
         });
 
         resp.on("end", () => {
@@ -63,11 +77,13 @@ ws.on("message", async (msg) => {
               requestId
             })
           );
+          console.log(`[Client] Stream ended for request ${requestId}`);
         });
       }
     );
 
-    req.on("error", () => {
+    req.on("error", (err) => {
+      console.error(`[Client] HTTP request error:`, err);
       ws.send(
         JSON.stringify({
           type: "response",
@@ -86,4 +102,8 @@ ws.on("message", async (msg) => {
     }
     req.end();
   }
+});
+
+ws.on("error", (err) => {
+  console.error(`[Client] WebSocket error:`, err);
 });

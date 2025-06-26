@@ -13,7 +13,14 @@ wss.on("connection", (ws) => {
   let clientId = null;
 
   ws.on("message", (msg) => {
-    const data = JSON.parse(msg);
+    let data;
+    try {
+      data = JSON.parse(msg);
+      console.log(`[Server] Received message:`, data);
+    } catch (err) {
+      console.error(`[Server] Failed to parse message:`, msg.toString(), err);
+      return;
+    }
 
     if (data.type === "register") {
       clientId = data.clientId;
@@ -25,7 +32,10 @@ wss.on("connection", (ws) => {
     if (data.type === "response") {
       const { requestId, body, status, headers, encoding, isStream } = data;
       const res = pendingRequests.get(requestId);
-      if (!res) return;
+      if (!res) {
+        console.warn(`[Server] No pending request for ID: ${requestId}`);
+        return;
+      }
 
       if (headers) {
         Object.entries(headers).forEach(([key, value]) => {
@@ -35,14 +45,22 @@ wss.on("connection", (ws) => {
       }
 
       if (isStream) {
-        // Initialize response with status, but don't send body yet
         res.status(status || 200);
+        console.log(`[Server] Started streaming response for request ${requestId}`);
       } else if (encoding === "base64") {
-        res.status(status || 200).send(Buffer.from(body, "base64"));
-        pendingRequests.delete(requestId);
+        try {
+          res.status(status || 200).send(Buffer.from(body, "base64"));
+          pendingRequests.delete(requestId);
+          console.log(`[Server] Sent non-streamed response for request ${requestId}`);
+        } catch (err) {
+          console.error(`[Server] Error decoding body:`, err);
+          res.status(500).send("Server error");
+          pendingRequests.delete(requestId);
+        }
       } else {
         res.status(status || 200).send(body);
         pendingRequests.delete(requestId);
+        console.log(`[Server] Sent non-streamed response for request ${requestId}`);
       }
     }
 
@@ -50,7 +68,14 @@ wss.on("connection", (ws) => {
       const { requestId, chunk } = data;
       const res = pendingRequests.get(requestId);
       if (res) {
-        res.write(Buffer.from(chunk, "base64"));
+        try {
+          res.write(Buffer.from(chunk, "base64"));
+          console.log(`[Server] Wrote chunk for request ${requestId}, size: ${Buffer.from(chunk, "base64").length}`);
+        } catch (err) {
+          console.error(`[Server] Error decoding chunk:`, err);
+          res.status(500).end("Chunk decoding error");
+          pendingRequests.delete(requestId);
+        }
       }
     }
 
@@ -60,6 +85,7 @@ wss.on("connection", (ws) => {
       if (res) {
         res.end();
         pendingRequests.delete(requestId);
+        console.log(`[Server] Stream ended for request ${requestId}`);
       }
     }
   });
@@ -70,6 +96,10 @@ wss.on("connection", (ws) => {
       console.log(`[Relay] Client disconnected: ${clientId}`);
     }
   });
+
+  ws.on("error", (err) => {
+    console.error(`[Server] WebSocket error:`, err);
+  });
 });
 
 app.use(express.json());
@@ -79,6 +109,7 @@ app.all("/tunnel/:clientId/*", async (req, res) => {
   const clientWs = clients.get(clientId);
 
   if (!clientWs) {
+    console.error(`[Server] Client ${clientId} not connected`);
     return res.status(502).send("Tunnel client not connected");
   }
 
@@ -95,13 +126,15 @@ app.all("/tunnel/:clientId/*", async (req, res) => {
       body: req.body
     })
   );
+  console.log(`[Server] Sent request ${requestId} to client ${clientId}`);
 
   setTimeout(() => {
     if (pendingRequests.has(requestId)) {
+      console.warn(`[Server] Timeout for request ${requestId}`);
       res.status(504).send("Tunnel timeout");
       pendingRequests.delete(requestId);
     }
-  }, 10000);
+  }, 30000);
 });
 
 server.listen(3005, () => console.log(`Relay server running at http://localhost:3005`));
