@@ -28,6 +28,8 @@ wss.on("connection", (ws) => {
       const res = pendingRequests.get(requestId);
       if (!res) return;
 
+      console.log(headers, "headers-------");
+
       if (headers) {
         Object.entries(headers).forEach(([key, value]) => {
           if (key.toLowerCase() === "content-encoding") return;
