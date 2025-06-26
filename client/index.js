@@ -1,78 +1,78 @@
 const WebSocket = require("ws");
 const http = require("http");
+const { pipeline } = require("stream");
+const { URL } = require("url");
 
-const clientId = "dev123";
-const relayUrl = "ws://localhost:3005";
 const localTarget = "http://localhost:3000";
+const clientId = "dev123";
 
-const ws = new WebSocket(relayUrl);
+const targetURL = new URL(localTarget);
+
+const ws = new WebSocket("ws://localhost:3005");
 
 ws.on("open", () => {
   ws.send(JSON.stringify({ type: "register", clientId }));
-  console.log(`[Client] Connected as ${clientId}`);
+  console.log(`[Client] Registered as ${clientId}`);
 });
 
-ws.on("message", async (msg) => {
-  const data = JSON.parse(msg);
+const pendingRequests = new Map();
 
-  if (data.type === "request") {
-    const { requestId, method, path, headers, body } = data;
+ws.on("message", (msg, isBinary) => {
+  if (!isBinary) {
+    const data = JSON.parse(msg);
 
-    const options = {
-      method,
-      headers
-    };
-    const url = new URL(localTarget + "/" + path);
-    console.log("🚀 ~ ws.on ~ url:", url);
+    if (data.type === "request") {
+      const { requestId, method, path, headers } = data;
 
-    const req = http.request(
-      {
-        hostname: url.hostname,
-        port: url.port,
-        path: url.pathname + url.search,
+      const reqOptions = {
+        hostname: targetURL.hostname,
+        port: targetURL.port || 80,
+        path: `/${path}`,
         method,
         headers
-      },
-      (resp) => {
-        const { requestId } = data;
-        let chunks = [];
+      };
 
-        resp.on("data", (chunk) => chunks.push(chunk));
+      const proxyReq = http.request(reqOptions, (proxyRes) => {
+        ws.send(
+          JSON.stringify({
+            type: "response-headers",
+            requestId,
+            status: proxyRes.statusCode,
+            headers: proxyRes.headers
+          })
+        );
 
-        resp.on("end", () => {
-          const buffer = Buffer.concat(chunks);
-          ws.send(
-            JSON.stringify({
-              type: "response",
-              requestId,
-              status: resp.statusCode,
-              headers: resp.headers,
-              body: buffer.toString("base64"),
-              encoding: "base64"
-            })
-          );
+        pipeline(proxyRes, ws, (err) => {
+          if (err) console.error("Pipeline error:", err);
+          ws.send(JSON.stringify({ type: "response-end", requestId }));
         });
-      }
-    );
-    console.log(req, "lllllll");
+      });
 
-    req.on("error", () => {
-      ws.send(
-        JSON.stringify({
-          type: "response",
-          requestId,
-          status: 502,
-          body: "Local proxy error"
-        })
-      );
-    });
+      proxyReq.on("error", (err) => {
+        ws.send(
+          JSON.stringify({
+            type: "response-headers",
+            requestId,
+            status: 502,
+            headers: { "content-type": "text/plain" }
+          })
+        );
+        ws.send(Buffer.from(`Proxy Error: ${err.message}`));
+        ws.send(JSON.stringify({ type: "response-end", requestId }));
+      });
 
-    if (body && ["POST", "PUT", "PATCH"].includes(method.toUpperCase())) {
-      const rawBody = JSON.stringify(body);
-      req.setHeader("Content-Type", "application/json");
-      req.setHeader("Content-Length", Buffer.byteLength(rawBody));
-      req.write(rawBody);
+      pendingRequests.set(requestId, proxyReq);
     }
-    req.end();
+
+    if (data.type === "request-end") {
+      const req = pendingRequests.get(data.requestId);
+      if (req) {
+        req.end();
+        pendingRequests.delete(data.requestId);
+      }
+    }
+  } else {
+    const lastReq = Array.from(pendingRequests.values()).pop();
+    if (lastReq) lastReq.write(msg);
   }
 });

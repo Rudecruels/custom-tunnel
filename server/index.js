@@ -6,85 +6,90 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-const clients = new Map();
-const pendingRequests = new Map();
+const clients = new Map(); // clientId -> WebSocket
+const streams = new Map(); // requestId -> res
 
 wss.on("connection", (ws) => {
-  let clientId = null;
+  let clientId;
 
-  ws.on("message", (msg) => {
-    const data = JSON.parse(msg);
+  ws.on("message", (msg, isBinary) => {
+    if (!isBinary) {
+      const data = JSON.parse(msg);
 
-    if (data.type === "register") {
-      clientId = data.clientId;
-      clients.set(clientId, ws);
-      console.log(`[Relay] Client registered: ${clientId}`);
-      return;
-    }
-
-    if (data.type === "response") {
-      const { requestId, body, status, headers, encoding } = data;
-
-      const res = pendingRequests.get(requestId);
-      if (!res) return;
-
-      console.log(headers, "headers-------");
-
-      if (headers) {
-        Object.entries(headers).forEach(([key, value]) => {
-          if (key.toLowerCase() === "content-encoding") return;
-          res.setHeader(key, value);
-        });
+      if (data.type === "register") {
+        clientId = data.clientId;
+        clients.set(clientId, ws);
+        console.log(`[Relay] Client registered: ${clientId}`);
+        return;
       }
 
-      if (encoding === "base64") {
-        res.status(status || 200).send(Buffer.from(body, "base64"));
-      } else {
-        res.status(status || 200).send(body);
+      if (data.type === "response-headers") {
+        const { requestId, status, headers } = data;
+        const res = streams.get(requestId);
+        if (res) {
+          res.writeHead(status || 200, headers);
+        }
+        return;
       }
 
-      pendingRequests.delete(requestId);
+      if (data.type === "response-end") {
+        const res = streams.get(data.requestId);
+        if (res) res.end();
+        streams.delete(data.requestId);
+        return;
+      }
+    } else {
+      // Binary data -> pipe to HTTP response
+      const { requestId } = ws; // must be tracked
+      const res = streams.get(requestId);
+      if (res) res.write(msg);
     }
   });
 
   ws.on("close", () => {
-    if (clientId) {
-      clients.delete(clientId);
-      console.log(`[Relay] Client disconnected: ${clientId}`);
-    }
+    if (clientId) clients.delete(clientId);
   });
 });
-
-app.use(express.json());
 
 app.all("/tunnel/:clientId/*", async (req, res) => {
   const clientId = req.params.clientId;
   const clientWs = clients.get(clientId);
+  const path = req.params[0];
 
-  if (!clientWs) {
-    return res.status(502).send("Tunnel client not connected");
-  }
+  if (!clientWs) return res.status(502).send("Tunnel client not connected");
 
-  const requestId = Math.random().toString(36).slice(2);
-  pendingRequests.set(requestId, res);
+  const requestId = Math.random().toString(36).substring(2);
+  streams.set(requestId, res);
+  clientWs.requestId = requestId;
 
-  clientWs.send(
-    JSON.stringify({
-      type: "request",
-      requestId,
-      method: req.method,
-      path: req.params[0],
-      headers: req.headers,
-      body: req.body
-    })
-  );
+  const requestPayload = JSON.stringify({
+    type: "request",
+    requestId,
+    method: req.method,
+    path,
+    headers: req.headers
+  });
+
+  clientWs.send(requestPayload);
+
+  req.on("data", (chunk) => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(chunk, { binary: true });
+    }
+  });
+
+  req.on("end", () => {
+    clientWs.send(JSON.stringify({ type: "request-end", requestId }));
+  });
 
   setTimeout(() => {
-    if (pendingRequests.has(requestId)) {
+    if (streams.has(requestId)) {
       res.status(504).send("Tunnel timeout");
-      pendingRequests.delete(requestId);
+      streams.delete(requestId);
     }
   }, 10000);
 });
 
-server.listen(3005, () => console.log(`Relay server running at http://localhost:3005`));
+server.listen(3005, () => {
+  console.log("Relay server listening on http://localhost:3005");
+});
